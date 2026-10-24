@@ -34,28 +34,16 @@ export async function runKagiOperation<T>(
 
       if (retriable && attempt < context.retries) {
         retriesUsed = attempt + 1;
-        await backoffDelay(attempt);
+        await backoffDelay(attempt, options.signal);
+        if (options.signal?.aborted) {
+          const abortError = new Error("Request aborted");
+          abortError.name = "AbortError";
+          return failureResult(abortError, context, start, retriesUsed, false);
+        }
         continue;
       }
 
-      return {
-        ok: false,
-        error: {
-          status,
-          tool: context.tool,
-          endpoint: context.endpoint,
-          retriable,
-          message: errorMessage(error, status),
-          body: getBody(error),
-        },
-        meta: {
-          ok: false,
-          status,
-          request_id: getRequestId(error),
-          duration_ms: Date.now() - start,
-          retries_used: retriesUsed,
-        },
-      };
+      return failureResult(error, context, start, retriesUsed, retriable);
     }
   }
 
@@ -79,11 +67,55 @@ export function isRetriableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-export async function backoffDelay(attempt: number): Promise<void> {
+export async function backoffDelay(attempt: number, signal?: AbortSignal): Promise<void> {
   const exp = Math.min(RUNTIME_CONFIG.maxBackoffMs, RUNTIME_CONFIG.initialBackoffMs * (2 ** attempt));
   const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(exp * 0.2)));
   const delayMs = Math.min(RUNTIME_CONFIG.maxBackoffMs, exp + jitter);
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return;
+  }
+  if (signal.aborted) return;
+
+  await new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const finish = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timeout = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) finish();
+  });
+}
+
+function failureResult<T>(
+  error: unknown,
+  context: RequestContext,
+  start: number,
+  retriesUsed: number,
+  retriable: boolean,
+): ToolResult<T> {
+  const status = getStatus(error);
+  return {
+    ok: false,
+    error: {
+      status,
+      tool: context.tool,
+      endpoint: context.endpoint,
+      retriable,
+      message: errorMessage(error, status),
+      body: getBody(error),
+    },
+    meta: {
+      ok: false,
+      status,
+      request_id: getRequestId(error),
+      duration_ms: Date.now() - start,
+      retries_used: retriesUsed,
+    },
+  };
 }
 
 export function errorMessage(error: unknown, status?: number): string {

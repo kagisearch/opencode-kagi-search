@@ -41,3 +41,23 @@ test("completes normally when the external signal never aborts", async () => {
   assert.equal(result.ok, true);
   assert.equal(result.data, "done");
 });
+
+test("external abort during retry backoff returns without starting another attempt", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const resultPromise = runKagiOperation(
+    async () => {
+      attempts++;
+      throw new Error("temporary network failure");
+    },
+    { tool: "kagi_search", endpoint: "/search", timeoutMs: 5000, retries: 2 },
+    { signal: controller.signal },
+  );
+
+  setTimeout(() => controller.abort(), 10);
+  const result = await resultPromise;
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error?.retriable, false);
+  assert.equal(attempts, 1);
+});
