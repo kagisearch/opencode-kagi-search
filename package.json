@@ -19,6 +19,7 @@
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
     "prepare": "npm run build"
   },
   "keywords": [
@@ -31,10 +32,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@opencode-ai/plugin": "^1.14.48"
+    "@opencode/plugin": "^2.0.32"
   },
   "devDependencies": {
     "@types/node": "^25.6.2",
+    "tsx": "^4.22.3",
     "typescript": "^6.0.3"
   }
 }

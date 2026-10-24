@@ -10,13 +10,14 @@ export const RUNTIME_CONFIG: RuntimeConfig = {
 export async function runKagiOperation<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   context: RequestContext,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ToolResult<T>> {
   const start = Date.now();
   let retriesUsed = 0;
 
   for (let attempt = 0; attempt <= context.retries; attempt++) {
     try {
-      const data = await withTimeout(operation, context.timeoutMs);
+      const data = await withTimeout(operation, context.timeoutMs, options.signal);
       return {
         ok: true,
         data,
@@ -28,32 +29,21 @@ export async function runKagiOperation<T>(
       };
     } catch (error) {
       const status = getStatus(error);
-      const retriable = status === undefined || isRetriableStatus(status);
+      const externallyAborted = options.signal?.aborted === true;
+      const retriable = !externallyAborted && (status === undefined || isRetriableStatus(status));
 
       if (retriable && attempt < context.retries) {
         retriesUsed = attempt + 1;
-        await backoffDelay(attempt);
+        await backoffDelay(attempt, options.signal);
+        if (options.signal?.aborted) {
+          const abortError = new Error("Request aborted");
+          abortError.name = "AbortError";
+          return failureResult(abortError, context, start, retriesUsed, false);
+        }
         continue;
       }
 
-      return {
-        ok: false,
-        error: {
-          status,
-          tool: context.tool,
-          endpoint: context.endpoint,
-          retriable,
-          message: errorMessage(error, status),
-          body: getBody(error),
-        },
-        meta: {
-          ok: false,
-          status,
-          request_id: getRequestId(error),
-          duration_ms: Date.now() - start,
-          retries_used: retriesUsed,
-        },
-      };
+      return failureResult(error, context, start, retriesUsed, retriable);
     }
   }
 
@@ -77,11 +67,55 @@ export function isRetriableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-export async function backoffDelay(attempt: number): Promise<void> {
+export async function backoffDelay(attempt: number, signal?: AbortSignal): Promise<void> {
   const exp = Math.min(RUNTIME_CONFIG.maxBackoffMs, RUNTIME_CONFIG.initialBackoffMs * (2 ** attempt));
   const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(exp * 0.2)));
   const delayMs = Math.min(RUNTIME_CONFIG.maxBackoffMs, exp + jitter);
-  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return;
+  }
+  if (signal.aborted) return;
+
+  await new Promise<void>((resolve) => {
+    let timeout: ReturnType<typeof setTimeout>;
+    const finish = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    timeout = setTimeout(finish, delayMs);
+    signal.addEventListener("abort", finish, { once: true });
+    if (signal.aborted) finish();
+  });
+}
+
+function failureResult<T>(
+  error: unknown,
+  context: RequestContext,
+  start: number,
+  retriesUsed: number,
+  retriable: boolean,
+): ToolResult<T> {
+  const status = getStatus(error);
+  return {
+    ok: false,
+    error: {
+      status,
+      tool: context.tool,
+      endpoint: context.endpoint,
+      retriable,
+      message: errorMessage(error, status),
+      body: getBody(error),
+    },
+    meta: {
+      ok: false,
+      status,
+      request_id: getRequestId(error),
+      duration_ms: Date.now() - start,
+      retries_used: retriesUsed,
+    },
+  };
 }
 
 export function errorMessage(error: unknown, status?: number): string {
@@ -115,10 +149,16 @@ function getRequestId(error: unknown): string | undefined {
 async function withTimeout<T>(
   operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
+  externalSignal?: AbortSignal,
 ): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const signal = controller.signal;
+  const onExternalAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
 
   const timeoutPromise = new Promise<T>((_, reject) => {
     signal.addEventListener(
@@ -136,5 +176,6 @@ async function withTimeout<T>(
     return await Promise.race([operation(signal), timeoutPromise]);
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
   }
 }

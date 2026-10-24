@@ -21,9 +21,7 @@ Add to `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-kagi-search"],
-  // Add to prefer kagi for search
-  "permission": { "websearch": "deny", "webfetch": "deny" }
+  "plugins": ["opencode-kagi-search"]
 }
 ```
 
@@ -32,9 +30,36 @@ Local checkout:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/absolute/path/to/opencode-kagi-search"]
+  "plugins": ["/absolute/path/to/opencode-kagi-search"]
 }
 ```
+
+## Websearch provider
+
+The plugin registers Kagi as an OpenCode websearch provider, so the built-in `websearch` tool can route queries through Kagi alongside the bundled providers.
+
+Select it globally with:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-kagi-search"],
+  "websearch": { "provider": "kagi" }
+}
+```
+
+Or ask the plugin to set it as the default provider itself (useful when you want Kagi everywhere without extra config):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    { "package": "opencode-kagi-search", "options": { "defaultProvider": true } }
+  ]
+}
+```
+
+If `KAGI_API_KEY` is not set, the plugin still loads; Kagi calls return a descriptive error until the key is provided.
 
 ## Tools
 
@@ -78,6 +103,7 @@ Retry applies to `429` and `5xx` only.
 ```bash
 npm install
 npm run typecheck
+npm test
 npm run build
 ```
 
