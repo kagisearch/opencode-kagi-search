@@ -2,9 +2,11 @@
 
 Kagi Search and Extract tools for OpenCode
 
-## Requirements
+## Setup
 
-Set `KAGI_API_KEY` in your shell before starting OpenCode.
+Connect Kagi through OpenCode's credential store before using the tools: run `/connect` in the TUI (choose Kagi, then paste your API key) or run `opencode auth login kagi --method key` in the CLI.
+
+The API key lives in OpenCode's credential store.
 
 ## Install
 
@@ -59,7 +61,7 @@ Or ask the plugin to set it as the default provider itself (useful when you want
 }
 ```
 
-If `KAGI_API_KEY` is not set, the plugin still loads; Kagi calls return a descriptive error until the key is provided.
+Until Kagi is connected, the plugin still loads; `kagi_search` and `kagi_extract` return an error pointing at `/connect`, while the built-in `websearch` tool reports a generic failure.
 
 ## Tools
 

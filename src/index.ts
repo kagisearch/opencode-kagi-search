@@ -1,9 +1,15 @@
 import { Plugin } from "@opencode/plugin";
+import {
+  KEY_RESOLUTION_FAILED_MESSAGE,
+  MISSING_KEY_GUIDANCE,
+  resolveKagiKey,
+  resolveKagiKeyOrFail,
+} from "./credential.js";
 // Local vendored wrapper for the upstream generated Kagi client.
 import { createConfiguration as createKagiConfiguration, ExtractApi, SearchApi } from "./vendor/kagi-api.js";
 import { RUNTIME_CONFIG, runKagiOperation } from "./util.js";
 import { createKagiProvider, type KagiSearchResponse } from "./websearch.js";
-import type { ExtractRequest, SearchRequest, ToolResult } from "./types.js";
+import type { ExtractRequest, SearchRequest } from "./types.js";
 
 const searchInputSchema = {
   type: "object",
@@ -87,19 +93,11 @@ function validateExtractRequest(request: ExtractRequest | undefined): void {
   }
 }
 
-function missingKeyResult(tool: "kagi_search" | "kagi_extract", endpoint: "/search" | "/extract"): ToolResult<never> {
-  return {
-    ok: false,
-    error: {
-      tool,
-      endpoint,
-      retriable: false,
-      message:
-        "KAGI_API_KEY is not set. Provide it in the OpenCode server environment " +
-        "(e.g. `KAGI_API_KEY=... opencode`) before using the Kagi tools.",
-    },
-    meta: { ok: false, duration_ms: 0, retries_used: 0 },
-  };
+// Attaching a numeric code lets getStatus classify this as HTTP 401,
+// which isRetriableStatus treats as non-retriable, so an unusable key
+// never triggers request retries.
+function credentialAccessError(message: string): Error {
+  return Object.assign(new Error(message), { code: 401 });
 }
 
 export const KagiSearchPlugin = Plugin.define({
@@ -107,17 +105,36 @@ export const KagiSearchPlugin = Plugin.define({
 
   async setup(ctx) {
     const options = ctx.options as { defaultProvider?: boolean } | undefined;
-    const apiKey = process.env.KAGI_API_KEY ?? "";
+    const connection = ctx.integration.connection;
 
-    if (!apiKey) {
-      console.log(
-        "[opencode-kagi-search] KAGI_API_KEY is not set; Kagi tools will return an error until it is provided.",
-      );
-    }
+    await ctx.integration.transform((editor) => {
+      editor.update("kagi", (integration) => {
+        integration.name = "Kagi";
+      });
+      editor.method.update({
+        integrationID: "kagi",
+        method: { type: "key", label: "Kagi API key" },
+      });
+    });
 
     const kagiConfig = createKagiConfiguration({
       authMethods: {
-        kagi: { tokenProvider: { getToken: () => apiKey } },
+        kagi: {
+          tokenProvider: {
+            // Resolve per request (never at setup) so a rotated or re-stored
+            // key takes effect on the very next call.
+            getToken: async () => {
+              let key: string | undefined;
+              try {
+                key = await resolveKagiKey(connection);
+              } catch {
+                throw credentialAccessError(KEY_RESOLUTION_FAILED_MESSAGE);
+              }
+              if (!key) throw credentialAccessError(MISSING_KEY_GUIDANCE);
+              return key;
+            },
+          },
+        },
       },
     });
 
@@ -143,7 +160,8 @@ export const KagiSearchPlugin = Plugin.define({
     // `defaultProvider: true` to also select it as the default provider.
     await ctx.websearch.transform((editor) => {
       const provider = createKagiProvider(async (query, { signal }) => {
-        if (!apiKey) return missingKeyResult("kagi_search", "/search") as ToolResult<KagiSearchResponse>;
+        const resolved = await resolveKagiKeyOrFail(connection, "kagi_search", "/search");
+        if (typeof resolved !== "string") return resolved;
         return runKagiOperation<KagiSearchResponse>(
           (attemptSignal) => searchApi.search<KagiSearchResponse>({ query, limit: 10 }, withSignal(attemptSignal)),
           {
@@ -176,18 +194,20 @@ export const KagiSearchPlugin = Plugin.define({
         async execute(input, context) {
           const request = (input as { request?: SearchRequest }).request;
           validateSearchRequest(request);
-          const result = apiKey
-            ? await runKagiOperation(
-                (signal) => searchApi.search(request as never, withSignal(signal)),
-                {
-                  tool: "kagi_search",
-                  endpoint: "/search",
-                  timeoutMs: RUNTIME_CONFIG.timeoutMs,
-                  retries: RUNTIME_CONFIG.maxRetries,
-                },
-                { signal: context.signal },
-              )
-            : missingKeyResult("kagi_search", "/search");
+          const resolved = await resolveKagiKeyOrFail(connection, "kagi_search", "/search");
+          const result =
+            typeof resolved === "string"
+              ? await runKagiOperation(
+                  (signal) => searchApi.search(request as never, withSignal(signal)),
+                  {
+                    tool: "kagi_search",
+                    endpoint: "/search",
+                    timeoutMs: RUNTIME_CONFIG.timeoutMs,
+                    retries: RUNTIME_CONFIG.maxRetries,
+                  },
+                  { signal: context.signal },
+                )
+              : resolved;
           return { content: JSON.stringify(result, null, 2) };
         },
       });
@@ -199,25 +219,27 @@ export const KagiSearchPlugin = Plugin.define({
         async execute(input, context) {
           const request = (input as { request?: ExtractRequest }).request;
           validateExtractRequest(request);
-          const result = apiKey
-            ? await runKagiOperation(
-                (signal) => extractApi.extractContent(request as never, withSignal(signal)),
-                {
-                  tool: "kagi_extract",
-                  endpoint: "/extract",
-                  timeoutMs: RUNTIME_CONFIG.timeoutMs,
-                  retries: RUNTIME_CONFIG.maxRetries,
-                },
-                { signal: context.signal },
-              )
-            : missingKeyResult("kagi_extract", "/extract");
+          const resolved = await resolveKagiKeyOrFail(connection, "kagi_extract", "/extract");
+          const result =
+            typeof resolved === "string"
+              ? await runKagiOperation(
+                  (signal) => extractApi.extractContent(request as never, withSignal(signal)),
+                  {
+                    tool: "kagi_extract",
+                    endpoint: "/extract",
+                    timeoutMs: RUNTIME_CONFIG.timeoutMs,
+                    retries: RUNTIME_CONFIG.maxRetries,
+                  },
+                  { signal: context.signal },
+                )
+              : resolved;
           return { content: JSON.stringify(result, null, 2) };
         },
       });
     });
 
     console.log(
-      `[opencode-kagi-search] initialized (timeout_ms=${RUNTIME_CONFIG.timeoutMs}, max_retries=${RUNTIME_CONFIG.maxRetries}, api_key=${apiKey ? "present" : "missing"})`,
+      `[opencode-kagi-search] initialized (timeout_ms=${RUNTIME_CONFIG.timeoutMs}, max_retries=${RUNTIME_CONFIG.maxRetries}); the API key resolves from OpenCode's credential store per call.`,
     );
   },
 });

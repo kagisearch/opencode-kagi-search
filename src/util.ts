@@ -121,7 +121,9 @@ function failureResult<T>(
 export function errorMessage(error: unknown, status?: number): string {
   if (error instanceof Error) {
     if (error.name === "AbortError") return "Kagi request timed out";
-    return status ? `Kagi API request failed with status ${status}` : error.message;
+    // Prefer the error's own message over the status fallback so specific
+    // guidance (like the credential-store hints) survives status tagging.
+    if (error.message || status === undefined) return error.message;
   }
   return status ? `Kagi API request failed with status ${status}` : "Unknown request error";
 }
